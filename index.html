@@ -3,35 +3,45 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Transaction Placeholder</title>
+    <title>Ledger Item Placeholder</title>
     <style>
         body {
             font-family: Arial, sans-serif;
             text-align: center;
             margin-top: 50px;
+            background-color: #f9f9f9;
+            color: #333;
         }
-        a {
-            text-decoration: none;
-            color: blue;
+        h1 {
+            color: #4CAF50;
+        }
+        p {
+            font-size: 18px;
+        }
+        .coming-soon {
+            font-size: 24px;
             font-weight: bold;
+            color: #ff9800;
+            margin-top: 20px;
         }
     </style>
 </head>
 <body>
-    <h1>Transaction Placeholder Page</h1>
+    <h1>Ledger Item Placeholder Page</h1>
     <p id="message">Loading...</p>
+    <p class="coming-soon">Coming Soon!</p>
 
     <script>
-        // Extract the transaction ID from the URL
+        // Extract the ledger item ID from the URL
         const params = new URLSearchParams(window.location.search);
-        const transactionID = params.get('id');
+        const ledgerItemID = params.get('id');
 
         // Update the page dynamically
         const messageElement = document.getElementById('message');
-        if (transactionID) {
-            messageElement.innerHTML = `Transaction ID: <strong>${transactionID}</strong>`;
+        if (ledgerItemID) {
+            messageElement.innerHTML = `Ledger Item ID: <strong>${ledgerItemID}</strong>`;
         } else {
-            messageElement.innerText = 'No Transaction ID provided.';
+            messageElement.innerText = 'No Ledger Item ID provided.';
         }
     </script>
 </body>
