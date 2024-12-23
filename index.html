@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transaction Placeholder</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 50px;
+        }
+        a {
+            text-decoration: none;
+            color: blue;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Transaction Placeholder Page</h1>
+    <p id="message">Loading...</p>
+
+    <script>
+        // Extract the transaction ID from the URL
+        const params = new URLSearchParams(window.location.search);
+        const transactionID = params.get('id');
+
+        // Update the page dynamically
+        const messageElement = document.getElementById('message');
+        if (transactionID) {
+            messageElement.innerHTML = `Transaction ID: <strong>${transactionID}</strong>`;
+        } else {
+            messageElement.innerText = 'No Transaction ID provided.';
+        }
+    </script>
+</body>
+</html>
