@@ -8,28 +8,94 @@
         body {
             font-family: Arial, sans-serif;
             text-align: center;
-            margin-top: 50px;
-            background-color: #f9f9f9;
+            background-color: #f4f4f9;
             color: #333;
+            margin: 0;
+            padding: 0;
+        }
+        header {
+            background-color: #4CAF50;
+            color: white;
+            padding: 20px 0;
         }
         h1 {
-            color: #4CAF50;
+            margin: 0;
         }
-        p {
-            font-size: 18px;
+        .content {
+            padding: 20px;
         }
         .coming-soon {
             font-size: 24px;
             font-weight: bold;
             color: #ff9800;
+            margin-bottom: 20px;
+        }
+        table {
+            width: 80%;
+            margin: 0 auto;
+            border-collapse: collapse;
+            background-color: white;
+        }
+        table, th, td {
+            border: 1px solid #ddd;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .footer {
             margin-top: 20px;
+            font-size: 14px;
+            color: #777;
         }
     </style>
 </head>
 <body>
-    <h1>Ledger Item Placeholder Page</h1>
-    <p id="message">Loading...</p>
-    <p class="coming-soon">Coming Soon!</p>
+    <header>
+        <h1>Ledger Item Placeholder</h1>
+    </header>
+    <div class="content">
+        <p id="message">Loading...</p>
+        <p class="coming-soon">Coming Soon!</p>
+
+        <!-- Dummy Ledger Table -->
+        <table>
+            <thead>
+                <tr>
+                    <th>Ledger Item ID</th>
+                    <th>Description</th>
+                    <th>Amount</th>
+                    <th>Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>12345</td>
+                    <td>Sample Transaction 1</td>
+                    <td>$100.00</td>
+                    <td>2024-12-23</td>
+                </tr>
+                <tr>
+                    <td>67890</td>
+                    <td>Sample Transaction 2</td>
+                    <td>$250.00</td>
+                    <td>2024-12-22</td>
+                </tr>
+                <tr>
+                    <td>54321</td>
+                    <td>Sample Transaction 3</td>
+                    <td>$500.00</td>
+                    <td>2024-12-21</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <footer class="footer">
+        Placeholder page for ledger item details.
+    </footer>
 
     <script>
         // Extract the ledger item ID from the URL
