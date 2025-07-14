@@ -1,25 +1,9 @@
--- ==============================================
--- FULL DEDUPLICATION & PARTY ID ASSIGNMENT SCRIPT
--- Logic: Name + DOB required, other fields used for scoring
--- Party IDs generated as P10000, P10001, ...
--- ==============================================
+-- ===============================
+-- DEDUPLICATION & PARTY ID ASSIGNMENT
+-- Final Working Version
+-- ===============================
 
--- Create config table if not exists
-IF OBJECT_ID('dbo.Dedupe_Config', 'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.Dedupe_Config (
-        RunID INT PRIMARY KEY IDENTITY(1,1),
-        MinConfidenceScore INT NOT NULL,
-        HighConfidenceThreshold INT NOT NULL,
-        CreatedDate DATETIME DEFAULT GETDATE()
-    );
-
-    -- Seed config
-    INSERT INTO dbo.Dedupe_Config (MinConfidenceScore, HighConfidenceThreshold)
-    VALUES (6, 8);
-END
-
--- Create IdentityKey map table if not exists
+-- STEP 1: Create required objects if not exist
 IF OBJECT_ID('dbo.Dedupe_IdentityKey_Map', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.Dedupe_IdentityKey_Map (
@@ -28,9 +12,8 @@ BEGIN
         CreatedDate DATETIME DEFAULT GETDATE(),
         NeedsReview BIT NOT NULL DEFAULT 0
     );
-END
+END;
 
--- Create lookup table if not exists
 IF OBJECT_ID('dbo.NEW_TEST_TAXID_LOOKUP', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.NEW_TEST_TAXID_LOOKUP (
@@ -40,45 +23,36 @@ BEGIN
         NAMEF VARCHAR(100),
         NAMEL VARCHAR(100),
         DOB DATE,
-        ADDR VARCHAR(200),
+        ADDR VARCHAR(255),
         CITY VARCHAR(100),
         STATE VARCHAR(50),
         ZIP VARCHAR(20),
-        EMAIL VARCHAR(100),
-        PHONE BIGINT,
+        EMAIL VARCHAR(255),
+        PHONE VARCHAR(50),
         ConfidenceScore INT,
         MatchConfidence VARCHAR(10),
         NeedsReview BIT,
-        RunID INT,
-        InsertedDate DATETIME DEFAULT GETDATE()
+        RunID INT
     );
-END
+END;
 
--- Create sequence if not exists
-IF NOT EXISTS (SELECT 1 FROM sys.sequences WHERE name = 'NEW_TEST_PARTY_ID_NUMBER')
+IF NOT EXISTS (SELECT * FROM sys.sequences WHERE name = 'NEW_TEST_PARTY_ID_NUMBER')
 BEGIN
-    CREATE SEQUENCE dbo.NEW_TEST_PARTY_ID_NUMBER
-        AS INT
-        START WITH 10000
-        INCREMENT BY 1;
-END
+    CREATE SEQUENCE dbo.NEW_TEST_PARTY_ID_NUMBER START WITH 10000 INCREMENT BY 1;
+END;
 
--- Load run config
+-- STEP 2: Parameters
 DECLARE @RunID INT = (SELECT MAX(RunID) FROM dbo.Dedupe_Config);
-DECLARE @MinConfidenceScore INT, @HighConfidenceThreshold INT;
-SELECT
-    @MinConfidenceScore = MinConfidenceScore,
-    @HighConfidenceThreshold = HighConfidenceThreshold
-FROM dbo.Dedupe_Config
-WHERE RunID = @RunID;
+DECLARE @MinConfidenceScore INT = 6;
+DECLARE @HighConfidenceThreshold INT = 8;
 
--- Assign field weights
+-- STEP 3: Weight Setup
 DECLARE @Weight_NAMEF INT = 2, @Weight_NAMEL INT = 2, @Weight_DOB INT = 2;
 DECLARE @Weight_ADDR INT = 2, @Weight_CITY INT = 1, @Weight_STATE INT = 1, @Weight_ZIP INT = 1;
 DECLARE @Weight_ADDR2 INT = 1, @Weight_CITY2 INT = 1, @Weight_STATE2 INT = 1, @Weight_ZIP2 INT = 1;
 DECLARE @Weight_EMAIL INT = 1, @Weight_PHONE INT = 1;
 
--- Build base dataset
+-- STEP 4: Load and Score Agents
 WITH Base AS (
     SELECT
         AGENTID,
@@ -95,9 +69,8 @@ WITH Base AS (
         TRIM(STATE2) AS STATE2,
         TRIM(ZIPCODE21) AS ZIP2,
         LOWER(TRIM(EMAIL)) AS EMAIL,
-        PHONE,
-        UPPER(TRIM(NAMEF)) + '|' + UPPER(TRIM(NAMEL)) + '|' +
-        ISNULL(FORMAT(DATEADD(DAY, DATEBIRTH, '1899-12-30'), 'yyyy-MM-dd'), 'NULL') AS IdentityKey
+        CAST(PHONE AS VARCHAR(50)) AS PHONE,
+        UPPER(TRIM(NAMEF)) + '|' + UPPER(TRIM(NAMEL)) + '|' + ISNULL(FORMAT(DATEADD(DAY, DATEBIRTH, '1899-12-30'), 'yyyy-MM-dd'), 'NULL') AS IdentityKey
     FROM dbo.AGENT
     WHERE COMPANY = '01'
 ),
@@ -115,14 +88,16 @@ Scored AS (
         (@Weight_STATE2* IIF(STATE2 <> '', 1, 0)) +
         (@Weight_ZIP2  * IIF(ZIP2 <> '', 1, 0)) +
         (@Weight_EMAIL * IIF(EMAIL <> '', 1, 0)) +
-        (@Weight_PHONE * IIF(PHONE IS NOT NULL, 1, 0)) AS ConfidenceScore
+        (@Weight_PHONE * IIF(PHONE <> '', 1, 0)) AS ConfidenceScore
     FROM Base
 ),
 Filtered AS (
     SELECT * FROM Scored WHERE ConfidenceScore >= @MinConfidenceScore
 )
+-- Ensure CTE ends properly
+SELECT COUNT(*) AS ValidRecords FROM Filtered;
 
--- Assign new Party IDs to unmatched IdentityKeys
+-- STEP 5: Assign new Party IDs using a CURSOR
 DECLARE @IdentityKey VARCHAR(500), @NextID INT, @ConfidenceScore INT;
 
 DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
@@ -150,8 +125,9 @@ END
 CLOSE cur;
 DEALLOCATE cur;
 
--- Join to mapped Party IDs
+-- STEP 6: Join Final Matches
 IF OBJECT_ID('tempdb..#MatchedAgents') IS NOT NULL DROP TABLE #MatchedAgents;
+
 SELECT
     A.AGENTID,
     A.TAXID,
@@ -171,7 +147,7 @@ INTO #MatchedAgents
 FROM Filtered A
 JOIN dbo.Dedupe_IdentityKey_Map M ON A.IdentityKey = M.IdentityKey;
 
--- Final insert into lookup table
+-- STEP 7: Insert into Lookup Table
 INSERT INTO dbo.NEW_TEST_TAXID_LOOKUP (
     PartyUniqueID, AGENTID, TAXID, NAMEF, NAMEL, DOB, ADDR, CITY, STATE, ZIP,
     EMAIL, PHONE, ConfidenceScore, MatchConfidence, NeedsReview, RunID
@@ -199,5 +175,5 @@ SELECT
     @RunID
 FROM #MatchedAgents;
 
--- Manual review candidates
--- SELECT * FROM dbo.NEW_TEST_TAXID_LOOKUP WHERE RunID = @RunID AND NeedsReview = 1;
+-- STEP 8: Manual Review Candidates
+-- SELECT * FROM #MatchedAgents WHERE NeedsReview = 1;
