@@ -1,0 +1,203 @@
+-- ==============================================
+-- FULL DEDUPLICATION & PARTY ID ASSIGNMENT SCRIPT
+-- Logic: Name + DOB required, other fields used for scoring
+-- Party IDs generated as P10000, P10001, ...
+-- ==============================================
+
+-- Create config table if not exists
+IF OBJECT_ID('dbo.Dedupe_Config', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.Dedupe_Config (
+        RunID INT PRIMARY KEY IDENTITY(1,1),
+        MinConfidenceScore INT NOT NULL,
+        HighConfidenceThreshold INT NOT NULL,
+        CreatedDate DATETIME DEFAULT GETDATE()
+    );
+
+    -- Seed config
+    INSERT INTO dbo.Dedupe_Config (MinConfidenceScore, HighConfidenceThreshold)
+    VALUES (6, 8);
+END
+
+-- Create IdentityKey map table if not exists
+IF OBJECT_ID('dbo.Dedupe_IdentityKey_Map', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.Dedupe_IdentityKey_Map (
+        IdentityKey VARCHAR(500) PRIMARY KEY,
+        PartyUniqueID VARCHAR(50) NOT NULL,
+        CreatedDate DATETIME DEFAULT GETDATE(),
+        NeedsReview BIT NOT NULL DEFAULT 0
+    );
+END
+
+-- Create lookup table if not exists
+IF OBJECT_ID('dbo.NEW_TEST_TAXID_LOOKUP', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.NEW_TEST_TAXID_LOOKUP (
+        PartyUniqueID VARCHAR(50),
+        AGENTID INT,
+        TAXID VARCHAR(50),
+        NAMEF VARCHAR(100),
+        NAMEL VARCHAR(100),
+        DOB DATE,
+        ADDR VARCHAR(200),
+        CITY VARCHAR(100),
+        STATE VARCHAR(50),
+        ZIP VARCHAR(20),
+        EMAIL VARCHAR(100),
+        PHONE BIGINT,
+        ConfidenceScore INT,
+        MatchConfidence VARCHAR(10),
+        NeedsReview BIT,
+        RunID INT,
+        InsertedDate DATETIME DEFAULT GETDATE()
+    );
+END
+
+-- Create sequence if not exists
+IF NOT EXISTS (SELECT 1 FROM sys.sequences WHERE name = 'NEW_TEST_PARTY_ID_NUMBER')
+BEGIN
+    CREATE SEQUENCE dbo.NEW_TEST_PARTY_ID_NUMBER
+        AS INT
+        START WITH 10000
+        INCREMENT BY 1;
+END
+
+-- Load run config
+DECLARE @RunID INT = (SELECT MAX(RunID) FROM dbo.Dedupe_Config);
+DECLARE @MinConfidenceScore INT, @HighConfidenceThreshold INT;
+SELECT
+    @MinConfidenceScore = MinConfidenceScore,
+    @HighConfidenceThreshold = HighConfidenceThreshold
+FROM dbo.Dedupe_Config
+WHERE RunID = @RunID;
+
+-- Assign field weights
+DECLARE @Weight_NAMEF INT = 2, @Weight_NAMEL INT = 2, @Weight_DOB INT = 2;
+DECLARE @Weight_ADDR INT = 2, @Weight_CITY INT = 1, @Weight_STATE INT = 1, @Weight_ZIP INT = 1;
+DECLARE @Weight_ADDR2 INT = 1, @Weight_CITY2 INT = 1, @Weight_STATE2 INT = 1, @Weight_ZIP2 INT = 1;
+DECLARE @Weight_EMAIL INT = 1, @Weight_PHONE INT = 1;
+
+-- Build base dataset
+WITH Base AS (
+    SELECT
+        AGENTID,
+        TAXID,
+        TRIM(NAMEF) AS NAMEF,
+        TRIM(NAMEL) AS NAMEL,
+        DATEADD(DAY, DATEBIRTH, '1899-12-30') AS DOB,
+        TRIM(ADDR) AS ADDR,
+        TRIM(CITY) AS CITY,
+        TRIM(STATE) AS STATE,
+        TRIM(ZIPCODE11) AS ZIP,
+        TRIM(ADDR2) AS ADDR2,
+        TRIM(CITY2) AS CITY2,
+        TRIM(STATE2) AS STATE2,
+        TRIM(ZIPCODE21) AS ZIP2,
+        LOWER(TRIM(EMAIL)) AS EMAIL,
+        PHONE,
+        UPPER(TRIM(NAMEF)) + '|' + UPPER(TRIM(NAMEL)) + '|' +
+        ISNULL(FORMAT(DATEADD(DAY, DATEBIRTH, '1899-12-30'), 'yyyy-MM-dd'), 'NULL') AS IdentityKey
+    FROM dbo.AGENT
+    WHERE COMPANY = '01'
+),
+Scored AS (
+    SELECT *,
+        (@Weight_NAMEF * IIF(NAMEF <> '', 1, 0)) +
+        (@Weight_NAMEL * IIF(NAMEL <> '', 1, 0)) +
+        (@Weight_DOB   * IIF(DOB IS NOT NULL, 1, 0)) +
+        (@Weight_ADDR  * IIF(ADDR <> '', 1, 0)) +
+        (@Weight_CITY  * IIF(CITY <> '', 1, 0)) +
+        (@Weight_STATE * IIF(STATE <> '', 1, 0)) +
+        (@Weight_ZIP   * IIF(ZIP <> '', 1, 0)) +
+        (@Weight_ADDR2 * IIF(ADDR2 <> '', 1, 0)) +
+        (@Weight_CITY2 * IIF(CITY2 <> '', 1, 0)) +
+        (@Weight_STATE2* IIF(STATE2 <> '', 1, 0)) +
+        (@Weight_ZIP2  * IIF(ZIP2 <> '', 1, 0)) +
+        (@Weight_EMAIL * IIF(EMAIL <> '', 1, 0)) +
+        (@Weight_PHONE * IIF(PHONE IS NOT NULL, 1, 0)) AS ConfidenceScore
+    FROM Base
+),
+Filtered AS (
+    SELECT * FROM Scored WHERE ConfidenceScore >= @MinConfidenceScore
+)
+
+-- Assign new Party IDs to unmatched IdentityKeys
+DECLARE @IdentityKey VARCHAR(500), @NextID INT, @ConfidenceScore INT;
+
+DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
+SELECT DISTINCT IdentityKey, MAX(ConfidenceScore)
+FROM Filtered
+WHERE IdentityKey NOT IN (SELECT IdentityKey FROM dbo.Dedupe_IdentityKey_Map)
+GROUP BY IdentityKey;
+
+OPEN cur;
+FETCH NEXT FROM cur INTO @IdentityKey, @ConfidenceScore;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SET @NextID = NEXT VALUE FOR dbo.NEW_TEST_PARTY_ID_NUMBER;
+
+    INSERT INTO dbo.Dedupe_IdentityKey_Map (IdentityKey, PartyUniqueID, NeedsReview)
+    VALUES (
+        @IdentityKey,
+        'P' + CAST(@NextID AS VARCHAR),
+        IIF(@ConfidenceScore < @HighConfidenceThreshold, 1, 0)
+    );
+
+    FETCH NEXT FROM cur INTO @IdentityKey, @ConfidenceScore;
+END
+CLOSE cur;
+DEALLOCATE cur;
+
+-- Join to mapped Party IDs
+IF OBJECT_ID('tempdb..#MatchedAgents') IS NOT NULL DROP TABLE #MatchedAgents;
+SELECT
+    A.AGENTID,
+    A.TAXID,
+    A.NAMEF,
+    A.NAMEL,
+    A.DOB,
+    A.ADDR,
+    A.CITY,
+    A.STATE,
+    A.ZIP,
+    A.EMAIL,
+    A.PHONE,
+    A.ConfidenceScore,
+    M.PartyUniqueID,
+    M.NeedsReview
+INTO #MatchedAgents
+FROM Filtered A
+JOIN dbo.Dedupe_IdentityKey_Map M ON A.IdentityKey = M.IdentityKey;
+
+-- Final insert into lookup table
+INSERT INTO dbo.NEW_TEST_TAXID_LOOKUP (
+    PartyUniqueID, AGENTID, TAXID, NAMEF, NAMEL, DOB, ADDR, CITY, STATE, ZIP,
+    EMAIL, PHONE, ConfidenceScore, MatchConfidence, NeedsReview, RunID
+)
+SELECT
+    PartyUniqueID,
+    AGENTID,
+    TAXID,
+    NAMEF,
+    NAMEL,
+    DOB,
+    ADDR,
+    CITY,
+    STATE,
+    ZIP,
+    EMAIL,
+    PHONE,
+    ConfidenceScore,
+    CASE 
+        WHEN ConfidenceScore >= @HighConfidenceThreshold THEN 'HIGH'
+        WHEN ConfidenceScore >= @MinConfidenceScore THEN 'MEDIUM'
+        ELSE 'LOW'
+    END,
+    NeedsReview,
+    @RunID
+FROM #MatchedAgents;
+
+-- Manual review candidates
+-- SELECT * FROM dbo.NEW_TEST_TAXID_LOOKUP WHERE RunID = @RunID AND NeedsReview = 1;
