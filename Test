@@ -1,0 +1,132 @@
+-- ==============================================
+-- FINAL DEDUPLICATION SCRIPT - PARTY ID ASSIGNMENT
+-- Logic: Name + DOB primary, weighted address scoring
+-- ==============================================
+
+-- Step 1: Pull latest config
+DECLARE @RunID INT = (SELECT MAX(RunID) FROM dbo.Dedupe_Config);
+DECLARE @MinConfidenceScore INT = 6;
+DECLARE @HighConfidenceThreshold INT = 8;
+
+-- Step 2: Load weight config
+DECLARE @Weight_NAMEF INT = 2, @Weight_NAMEL INT = 2, @Weight_DOB INT = 2;
+DECLARE @Weight_ADDR INT = 2, @Weight_CITY INT = 1, @Weight_STATE INT = 1, @Weight_ZIP INT = 1;
+DECLARE @Weight_ADDR2 INT = 1, @Weight_CITY2 INT = 1, @Weight_STATE2 INT = 1, @Weight_ZIP2 INT = 1;
+DECLARE @Weight_EMAIL INT = 1, @Weight_PHONE INT = 1;
+
+-- Step 3: Ensure mapping table exists
+IF OBJECT_ID('dbo.Dedupe_IdentityKey_Map', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.Dedupe_IdentityKey_Map (
+        IdentityKey VARCHAR(500) PRIMARY KEY,
+        PartyUniqueID VARCHAR(50) NOT NULL,
+        CreatedDate DATETIME DEFAULT GETDATE(),
+        NeedsReview BIT NOT NULL DEFAULT 0
+    );
+END
+
+-- Step 4: Build base agent dataset
+WITH Base AS (
+    SELECT
+        AGENTID,
+        TAXID,
+        TRIM(NAMEF) AS NAMEF,
+        TRIM(NAMEL) AS NAMEL,
+        DATEADD(DAY, DATEBIRTH, '1899-12-30') AS DOB,
+        TRIM(ADDR) AS ADDR,
+        TRIM(CITY) AS CITY,
+        TRIM(STATE) AS STATE,
+        TRIM(ZIPCODE11) AS ZIP,
+        TRIM(ADDR2) AS ADDR2,
+        TRIM(CITY2) AS CITY2,
+        TRIM(STATE2) AS STATE2,
+        TRIM(ZIPCODE21) AS ZIP2,
+        LOWER(TRIM(EMAIL)) AS EMAIL,
+        TRIM(PHONE) AS PHONE,
+        UPPER(TRIM(NAMEF)) + '|' + UPPER(TRIM(NAMEL)) + '|' + ISNULL(FORMAT(DATEADD(DAY, DATEBIRTH, '1899-12-30'), 'yyyy-MM-dd'), 'NULL') AS IdentityKey
+    FROM dbo.AGENT
+    WHERE COMPANY = '01'
+),
+Scored AS (
+    SELECT *,
+        (@Weight_NAMEF * IIF(NAMEF <> '', 1, 0)) +
+        (@Weight_NAMEL * IIF(NAMEL <> '', 1, 0)) +
+        (@Weight_DOB   * IIF(DOB IS NOT NULL, 1, 0)) +
+        (@Weight_ADDR  * IIF(ADDR <> '', 1, 0)) +
+        (@Weight_CITY  * IIF(CITY <> '', 1, 0)) +
+        (@Weight_STATE * IIF(STATE <> '', 1, 0)) +
+        (@Weight_ZIP   * IIF(ZIP <> '', 1, 0)) +
+        (@Weight_ADDR2 * IIF(ADDR2 <> '', 1, 0)) +
+        (@Weight_CITY2 * IIF(CITY2 <> '', 1, 0)) +
+        (@Weight_STATE2* IIF(STATE2 <> '', 1, 0)) +
+        (@Weight_ZIP2  * IIF(ZIP2 <> '', 1, 0)) +
+        (@Weight_EMAIL * IIF(EMAIL <> '', 1, 0)) +
+        (@Weight_PHONE * IIF(PHONE <> '', 1, 0)) AS ConfidenceScore
+    FROM Base
+),
+Filtered AS (
+    SELECT * FROM Scored WHERE ConfidenceScore >= @MinConfidenceScore
+)
+
+-- Step 5: Assign new Party IDs where needed
+INSERT INTO dbo.Dedupe_IdentityKey_Map (IdentityKey, PartyUniqueID, NeedsReview)
+SELECT DISTINCT
+    IdentityKey,
+    CAST(NEXT VALUE FOR dbo.NEW_TEST_PARTY_ID_NUMBER AS VARCHAR(50)),
+    IIF(MAX(ConfidenceScore) < @HighConfidenceThreshold, 1, 0)
+FROM Filtered F
+LEFT JOIN dbo.Dedupe_IdentityKey_Map M ON F.IdentityKey = M.IdentityKey
+WHERE M.IdentityKey IS NULL
+GROUP BY IdentityKey;
+
+-- Step 6: Final matched set
+IF OBJECT_ID('tempdb..#MatchedAgents') IS NOT NULL DROP TABLE #MatchedAgents;
+SELECT
+    A.AGENTID,
+    A.TAXID,
+    A.NAMEF,
+    A.NAMEL,
+    A.DOB,
+    A.ADDR,
+    A.CITY,
+    A.STATE,
+    A.ZIP,
+    A.EMAIL,
+    A.PHONE,
+    A.ConfidenceScore,
+    M.PartyUniqueID,
+    M.NeedsReview
+INTO #MatchedAgents
+FROM Filtered A
+JOIN dbo.Dedupe_IdentityKey_Map M ON A.IdentityKey = M.IdentityKey;
+
+-- Step 7: Insert into final lookup table
+INSERT INTO dbo.NEW_TEST_TAXID_LOOKUP (
+    PartyUniqueID, AGENTID, TAXID, NAMEF, NAMEL, DOB, ADDR, CITY, STATE, ZIP,
+    EMAIL, PHONE, ConfidenceScore, MatchConfidence, NeedsReview, RunID
+)
+SELECT
+    PartyUniqueID,
+    AGENTID,
+    TAXID,
+    NAMEF,
+    NAMEL,
+    DOB,
+    ADDR,
+    CITY,
+    STATE,
+    ZIP,
+    EMAIL,
+    PHONE,
+    ConfidenceScore,
+    CASE 
+        WHEN ConfidenceScore >= @HighConfidenceThreshold THEN 'HIGH'
+        WHEN ConfidenceScore >= @MinConfidenceScore THEN 'MEDIUM'
+        ELSE 'LOW'
+    END,
+    NeedsReview,
+    @RunID
+FROM #MatchedAgents;
+
+-- Step 8: Manual Review Set
+-- SELECT * FROM #MatchedAgents WHERE NeedsReview = 1;
